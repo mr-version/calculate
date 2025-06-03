@@ -1,0 +1,88 @@
+name: 'Calculate Versions'
+description: 'Calculate semantic versions for projects using Mister.Version'
+author: 'Mister.Version Team'
+
+branding:
+  icon: 'calculator'
+  color: 'green'
+
+inputs:
+  projects:
+    description: 'Glob pattern or list of project files to version (e.g., "src/**/*.csproj" or comma-separated paths)'
+    required: false
+    default: '**/*.csproj'
+  repository-path:
+    description: 'Path to the Git repository root'
+    required: false
+    default: '.'
+  prerelease-type:
+    description: 'Prerelease type for main/dev branches (none, alpha, beta, rc)'
+    required: false
+    default: 'none'
+  tag-prefix:
+    description: 'Prefix for version tags'
+    required: false
+    default: 'v'
+  force-version:
+    description: 'Force a specific version for all projects'
+    required: false
+  dependencies:
+    description: 'Comma-separated list of dependency paths to track for changes'
+    required: false
+  output-format:
+    description: 'Output format (json, yaml, text)'
+    required: false
+    default: 'json'
+  fail-on-no-changes:
+    description: 'Fail the action if no projects have version changes'
+    required: false
+    default: 'false'
+  update-project-properties:
+    description: 'Update version properties in project files'
+    required: false
+    default: 'false'
+  write-mrversion-props:
+    description: 'Write MrVersion.props file in each project directory'
+    required: false
+    default: 'false'
+  config-file:
+    description: 'Path to mr-version.yml configuration file (auto-detected if not specified)'
+    required: false
+  dry-run:
+    description: 'Run in dry-run mode (show what would be done without making changes)'
+    required: false
+    default: 'false'
+  output-version-information:
+    description: 'Display the version information output as part of the job summary.'
+    required: false
+    default: 'false'
+  include-test-projects:
+    description: 'Include test projects in the version calculation results'
+    required: false
+    default: 'false'
+
+outputs:
+  projects:
+    description: 'JSON array of project version information'
+  changed-projects:
+    description: 'JSON array of projects with version changes'
+  has-changes:
+    description: 'Whether any projects have version changes'
+  summary:
+    description: 'Human-readable summary of version calculations'
+  version-map:
+    description: 'JSON map of project names/paths to their calculated versions'
+  version:
+    description: 'The calculated version of the first changed project (if any)'
+  major:
+    description: 'Major version number of the first changed project'
+  minor:
+    description: 'Minor version number of the first changed project'
+  patch:
+    description: 'Patch version number of the first changed project'
+  prerelease:
+    description: 'Prerelease version string of the first changed project (if any)'
+
+runs:
+  using: 'node20'
+  main: 'dist/index.js'
