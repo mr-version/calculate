@@ -122,17 +122,49 @@ async function run(): Promise<void> {
       }
     }
 
+    // Add collapsible summary to job output
+    await core.summary
+      .addHeading('📊 Version Calculation Results')
+      .addDetails('📈 Summary', 
+        `- **Total Projects**: ${analysisResult.projects.length}\n` +
+        `- **Projects with Changes**: ${analysisResult.changedProjects.length}\n` +
+        `- **Test Projects**: ${results.filter(p => p.isTestProject).length}${!includeTestProjects ? ' (excluded)' : ''}\n` +
+        `- **Repository**: \`${repositoryPath}\`\n` +
+        `- **Prerelease Type**: \`${prereleaseType}\`\n` +
+        `- **Tag Prefix**: \`${tagPrefix}\``
+      )
+      .addDetails('🔄 Changed Projects', 
+        analysisResult.changedProjects.length > 0 
+          ? analysisResult.changedProjects.map(p => 
+              `- **${p.project}**: \`${p.version}\` _(${p.changeReason})_`
+            ).join('\n')
+          : '_No projects have version changes._'
+      )
+      .addDetails('✅ All Projects', 
+        analysisResult.projects.map(p => 
+          `- **${p.project}**: \`${p.version}\`${p.versionChanged ? ' 🔄' : ''}`
+        ).join('\n')
+      )
+
     if (outputVersionInformation) {
-      // Add to job summary
       await core.summary
-        .addHeading('📊 Version Calculation Results')
-        .addCodeBlock(formatSummary(analysisResult, outputFormat), outputFormat)
-        .write()
+        .addDetails('📋 Detailed Output', 
+          `\`\`\`${outputFormat}\n${formatSummary(analysisResult, outputFormat)}\n\`\`\``
+        )
     }
+
+    await core.summary.write()
 
     core.info(`✅ Analyzed ${results.length} projects, ${analysisResult.changedProjects.length} with changes`)
 
   } catch (error) {
+    await core.summary
+      .addHeading('❌ Version Calculation Failed')
+      .addDetails('🐛 Error Details',
+        `\`\`\`\n${error instanceof Error ? error.message : String(error)}\n\`\`\``
+      )
+      .write()
+
     core.setFailed(`Failed to calculate versions: ${error instanceof Error ? error.message : String(error)}`)
   }
 }

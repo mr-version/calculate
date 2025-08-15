@@ -1,353 +1,6 @@
 require('./sourcemap-register.js');/******/ (() => { // webpackBootstrap
 /******/ 	var __webpack_modules__ = ({
 
-/***/ 137:
-/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
-
-"use strict";
-
-var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    var desc = Object.getOwnPropertyDescriptor(m, k);
-    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
-      desc = { enumerable: true, get: function() { return m[k]; } };
-    }
-    Object.defineProperty(o, k2, desc);
-}) : (function(o, m, k, k2) {
-    if (k2 === undefined) k2 = k;
-    o[k2] = m[k];
-}));
-var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
-    Object.defineProperty(o, "default", { enumerable: true, value: v });
-}) : function(o, v) {
-    o["default"] = v;
-});
-var __importStar = (this && this.__importStar) || (function () {
-    var ownKeys = function(o) {
-        ownKeys = Object.getOwnPropertyNames || function (o) {
-            var ar = [];
-            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
-            return ar;
-        };
-        return ownKeys(o);
-    };
-    return function (mod) {
-        if (mod && mod.__esModule) return mod;
-        var result = {};
-        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
-        __setModuleDefault(result, mod);
-        return result;
-    };
-})();
-Object.defineProperty(exports, "__esModule", ({ value: true }));
-exports.run = run;
-const core = __importStar(__nccwpck_require__(7484));
-const exec = __importStar(__nccwpck_require__(5236));
-const glob = __importStar(__nccwpck_require__(7206));
-const path = __importStar(__nccwpck_require__(6928));
-const fs = __importStar(__nccwpck_require__(1943));
-async function run() {
-    try {
-        const projectsInput = core.getInput('projects') || '**/*.csproj';
-        const repositoryPath = core.getInput('repository-path') || '.';
-        const prereleaseType = core.getInput('prerelease-type') || 'none';
-        const tagPrefix = core.getInput('tag-prefix') || 'v';
-        const forceVersion = core.getInput('force-version');
-        const dependencies = core.getInput('dependencies');
-        const outputFormat = core.getInput('output-format') || 'json';
-        const failOnNoChanges = core.getBooleanInput('fail-on-no-changes');
-        const updateProjectProperties = core.getBooleanInput('update-project-properties');
-        const writeMrVersionProps = core.getBooleanInput('write-mrversion-props');
-        const configFile = core.getInput('config-file');
-        const outputVersionInformation = core.getBooleanInput('output-version-information');
-        const dryRun = core.getBooleanInput('dry-run');
-        const includeTestProjects = core.getBooleanInput('include-test-projects');
-        core.info('Calculating project versions...');
-        const projectFiles = await findProjectFiles(projectsInput, repositoryPath);
-        core.info(`Found ${projectFiles.length} project files`);
-        if (!includeTestProjects) {
-            core.info('Test projects will be excluded from results');
-        }
-        if (projectFiles.length === 0) {
-            if (failOnNoChanges) {
-                core.setFailed('No project files found and fail-on-no-changes is enabled');
-                return;
-            }
-            core.warning('No project files found matching the pattern');
-        }
-        const results = [];
-        for (const projectFile of projectFiles) {
-            const result = await calculateProjectVersion({
-                projectFile,
-                repositoryPath,
-                prereleaseType,
-                tagPrefix,
-                forceVersion,
-                dependencies,
-                configFile,
-                dryRun
-            });
-            results.push(result);
-        }
-        const analysisResult = analyzeResults(results, includeTestProjects);
-        if (failOnNoChanges && !analysisResult.hasChanges) {
-            core.setFailed('No version changes detected and fail-on-no-changes is enabled');
-            return;
-        }
-        const versionMap = createVersionMap(analysisResult.projects);
-        core.setOutput('projects', JSON.stringify(analysisResult.projects));
-        core.setOutput('changed-projects', JSON.stringify(analysisResult.changedProjects));
-        core.setOutput('has-changes', analysisResult.hasChanges.toString());
-        core.setOutput('summary', analysisResult.summary);
-        core.setOutput('version-map', JSON.stringify(versionMap));
-        if (analysisResult.projects.length > 0) {
-            const firstProject = analysisResult.projects[0];
-            const versionParts = firstProject.version.split(/[.-]/);
-            core.setOutput('version', firstProject.version);
-            core.setOutput('major', versionParts[0] || '0');
-            core.setOutput('minor', versionParts[1] || '0');
-            core.setOutput('patch', versionParts[2] || '0');
-            core.setOutput('prerelease', versionParts.length > 3 ? versionParts.slice(3).join('.') : '');
-        }
-        else {
-            core.setOutput('version', '0.1.0');
-            core.setOutput('major', '0');
-            core.setOutput('minor', '1');
-            core.setOutput('patch', '0');
-            core.setOutput('prerelease', '');
-        }
-        if (updateProjectProperties || writeMrVersionProps) {
-            if (dryRun) {
-                core.info('[DRY RUN] Would update project properties');
-            }
-            else {
-                await updateProjects(analysisResult.projects, updateProjectProperties, writeMrVersionProps);
-            }
-        }
-        if (outputVersionInformation) {
-            await core.summary
-                .addHeading('📊 Version Calculation Results')
-                .addCodeBlock(formatSummary(analysisResult, outputFormat), outputFormat)
-                .write();
-        }
-        core.info(`✅ Analyzed ${results.length} projects, ${analysisResult.changedProjects.length} with changes`);
-    }
-    catch (error) {
-        core.setFailed(`Failed to calculate versions: ${error instanceof Error ? error.message : String(error)}`);
-    }
-}
-async function findProjectFiles(pattern, repositoryPath) {
-    const globber = await glob.create(pattern, {
-        matchDirectories: false,
-        implicitDescendants: true
-    });
-    const files = await globber.glob();
-    return files.filter(file => file.endsWith('.csproj') ||
-        file.endsWith('.vbproj') ||
-        file.endsWith('.fsproj')).map(file => path.resolve(repositoryPath, file));
-}
-async function calculateProjectVersion(options) {
-    const args = [
-        'version',
-        '--repo', options.repositoryPath,
-        '--project', options.projectFile,
-        '--json'
-    ];
-    if (options.prereleaseType && options.prereleaseType !== 'none') {
-        args.push('--prerelease-type', options.prereleaseType);
-    }
-    if (options.tagPrefix) {
-        args.push('--tag-prefix', options.tagPrefix);
-    }
-    if (options.forceVersion) {
-        args.push('--force-version', options.forceVersion);
-    }
-    if (options.dependencies) {
-        args.push('--dependencies', options.dependencies);
-    }
-    if (options.configFile) {
-        args.push('--config-file', options.configFile);
-    }
-    if (options.dryRun) {
-        args.push('--dry-run');
-    }
-    const output = await exec.getExecOutput('mr-version', args, {
-        silent: true,
-        ignoreReturnCode: true
-    });
-    if (output.exitCode !== 0) {
-        throw new Error(`mr-version failed for ${options.projectFile}: ${output.stderr}`);
-    }
-    try {
-        const stdout = output.stdout.trim();
-        if (!stdout) {
-            throw new Error('mr-version returned empty output');
-        }
-        return JSON.parse(stdout);
-    }
-    catch (error) {
-        throw new Error(`Failed to parse mr-version output for ${options.projectFile}: ${error}`);
-    }
-}
-function analyzeResults(projects, includeTestProjects) {
-    const testProjectCount = projects.filter(p => p.isTestProject).length;
-    const filteredProjects = includeTestProjects
-        ? projects
-        : projects.filter(p => !p.isTestProject);
-    if (!includeTestProjects && testProjectCount > 0) {
-        core.info(`Filtered out ${testProjectCount} test project(s)`);
-    }
-    const changedProjects = filteredProjects.filter(p => p.versionChanged);
-    const hasChanges = changedProjects.length > 0;
-    const summary = generateSummary(filteredProjects, changedProjects);
-    return {
-        projects: filteredProjects,
-        changedProjects,
-        hasChanges,
-        summary
-    };
-}
-function generateSummary(allProjects, changedProjects) {
-    const lines = [];
-    lines.push(`**📊 Version Calculation Summary**`);
-    lines.push(`- Total projects: ${allProjects.length}`);
-    lines.push(`- Projects with changes: ${changedProjects.length}`);
-    lines.push(`- Projects unchanged: ${allProjects.length - changedProjects.length}`);
-    if (changedProjects.length > 0) {
-        lines.push('');
-        lines.push('**🔄 Changed Projects:**');
-        for (const project of changedProjects) {
-            lines.push(`- **${project.project}**: ${project.version} _(${project.changeReason})_`);
-        }
-    }
-    if (allProjects.length - changedProjects.length > 0) {
-        lines.push('');
-        lines.push('**✅ Unchanged Projects:**');
-        for (const project of allProjects.filter(p => !p.versionChanged)) {
-            lines.push(`- **${project.project}**: ${project.version}`);
-        }
-    }
-    return lines.join('\n');
-}
-function formatSummary(result, format) {
-    switch (format.toLowerCase()) {
-        case 'yaml':
-            return formatAsYaml(result);
-        case 'text':
-            return formatAsText(result);
-        case 'json':
-        default:
-            return JSON.stringify(result, null, 2);
-    }
-}
-function formatAsYaml(result) {
-    const lines = [];
-    lines.push('```yaml');
-    lines.push('projects:');
-    for (const project of result.projects) {
-        lines.push(`  - name: ${project.project}`);
-        lines.push(`    version: ${project.version}`);
-        lines.push(`    changed: ${project.versionChanged}`);
-        if (project.changeReason) {
-            lines.push(`    reason: "${project.changeReason}"`);
-        }
-    }
-    lines.push('```');
-    return lines.join('\n');
-}
-function formatAsText(result) {
-    const lines = [];
-    lines.push('```');
-    lines.push('Project Versions:');
-    lines.push('================');
-    for (const project of result.projects) {
-        const status = project.versionChanged ? '🔄 CHANGED' : '✅ UNCHANGED';
-        lines.push(`${status} ${project.project}: ${project.version}`);
-        if (project.changeReason) {
-            lines.push(`    Reason: ${project.changeReason}`);
-        }
-    }
-    lines.push('```');
-    return lines.join('\n');
-}
-function createVersionMap(projects) {
-    const map = {};
-    for (const project of projects) {
-        map[project.project] = project.version;
-        const relativePath = path.relative(process.cwd(), project.path);
-        map[relativePath] = project.version;
-    }
-    return map;
-}
-async function updateProjects(projects, updateProperties, writeProps) {
-    for (const project of projects) {
-        try {
-            if (updateProperties) {
-                await updateProjectFile(project);
-            }
-            if (writeProps) {
-                await writeMrVersionPropsFile(project);
-            }
-        }
-        catch (error) {
-            core.warning(`Failed to update project ${project.project}: ${error instanceof Error ? error.message : String(error)}`);
-        }
-    }
-}
-async function updateProjectFile(project) {
-    const content = await fs.readFile(project.path, 'utf8');
-    const versionMatch = project.version.match(/^(\d+)\.(\d+)\.(\d+)(?:-(.+))?$/);
-    if (!versionMatch) {
-        core.warning(`Cannot parse version ${project.version} for ${project.project}`);
-        return;
-    }
-    const [, major, minor, patch, prerelease] = versionMatch;
-    let updatedContent = content;
-    updatedContent = updatedContent.replace(/<Version>.*<\/Version>/g, `<Version>${project.version}</Version>`);
-    updatedContent = updatedContent.replace(/<VersionMajor>.*<\/VersionMajor>/g, `<VersionMajor>${major}</VersionMajor>`);
-    updatedContent = updatedContent.replace(/<VersionMinor>.*<\/VersionMinor>/g, `<VersionMinor>${minor}</VersionMinor>`);
-    updatedContent = updatedContent.replace(/<VersionPatch>.*<\/VersionPatch>/g, `<VersionPatch>${patch}</VersionPatch>`);
-    if (prerelease) {
-        updatedContent = updatedContent.replace(/<VersionSuffix>.*<\/VersionSuffix>/g, `<VersionSuffix>${prerelease}</VersionSuffix>`);
-    }
-    if (updatedContent !== content) {
-        await fs.writeFile(project.path, updatedContent, 'utf8');
-        core.info(`Updated version properties in ${project.project}`);
-    }
-}
-async function writeMrVersionPropsFile(project) {
-    const projectDir = path.dirname(project.path);
-    const propsPath = path.join(projectDir, 'MrVersion.props');
-    const versionMatch = project.version.match(/^(\d+)\.(\d+)\.(\d+)(?:-(.+))?$/);
-    if (!versionMatch) {
-        core.warning(`Cannot parse version ${project.version} for ${project.project}`);
-        return;
-    }
-    const [, major, minor, patch, prerelease] = versionMatch;
-    const propsContent = `<Project>
-  <!-- Generated by Mister.Version -->
-  <PropertyGroup>
-    <Version>${project.version}</Version>
-    <VersionMajor>${major}</VersionMajor>
-    <VersionMinor>${minor}</VersionMinor>
-    <VersionPatch>${patch}</VersionPatch>${prerelease ? `
-    <VersionSuffix>${prerelease}</VersionSuffix>` : ''}
-    <AssemblyVersion>${major}.${minor}.${patch}.0</AssemblyVersion>
-    <FileVersion>${major}.${minor}.${patch}.0</FileVersion>
-    <InformationalVersion>${project.version}${project.commitSha ? `+${project.commitSha.substring(0, 7)}` : ''}</InformationalVersion>
-  </PropertyGroup>
-</Project>
-`;
-    await fs.writeFile(propsPath, propsContent, 'utf8');
-    core.info(`Created MrVersion.props for ${project.project}`);
-}
-if (require.main === require.cache[eval('__filename')]) {
-    run();
-}
-//# sourceMappingURL=index.js.map
-
-/***/ }),
-
 /***/ 4914:
 /***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
@@ -28434,6 +28087,368 @@ module.exports = {
 
 /***/ }),
 
+/***/ 9407:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.run = run;
+const core = __importStar(__nccwpck_require__(7484));
+const exec = __importStar(__nccwpck_require__(5236));
+const glob = __importStar(__nccwpck_require__(7206));
+const path = __importStar(__nccwpck_require__(6928));
+const fs = __importStar(__nccwpck_require__(1943));
+async function run() {
+    try {
+        const projectsInput = core.getInput('projects') || '**/*.csproj';
+        const repositoryPath = core.getInput('repository-path') || '.';
+        const prereleaseType = core.getInput('prerelease-type') || 'none';
+        const tagPrefix = core.getInput('tag-prefix') || 'v';
+        const forceVersion = core.getInput('force-version');
+        const dependencies = core.getInput('dependencies');
+        const outputFormat = core.getInput('output-format') || 'json';
+        const failOnNoChanges = core.getBooleanInput('fail-on-no-changes');
+        const updateProjectProperties = core.getBooleanInput('update-project-properties');
+        const writeMrVersionProps = core.getBooleanInput('write-mrversion-props');
+        const configFile = core.getInput('config-file');
+        const outputVersionInformation = core.getBooleanInput('output-version-information');
+        const dryRun = core.getBooleanInput('dry-run');
+        const includeTestProjects = core.getBooleanInput('include-test-projects');
+        core.info('Calculating project versions...');
+        const projectFiles = await findProjectFiles(projectsInput, repositoryPath);
+        core.info(`Found ${projectFiles.length} project files`);
+        if (!includeTestProjects) {
+            core.info('Test projects will be excluded from results');
+        }
+        if (projectFiles.length === 0) {
+            if (failOnNoChanges) {
+                core.setFailed('No project files found and fail-on-no-changes is enabled');
+                return;
+            }
+            core.warning('No project files found matching the pattern');
+        }
+        const results = [];
+        for (const projectFile of projectFiles) {
+            const result = await calculateProjectVersion({
+                projectFile,
+                repositoryPath,
+                prereleaseType,
+                tagPrefix,
+                forceVersion,
+                dependencies,
+                configFile,
+                dryRun
+            });
+            results.push(result);
+        }
+        const analysisResult = analyzeResults(results, includeTestProjects);
+        if (failOnNoChanges && !analysisResult.hasChanges) {
+            core.setFailed('No version changes detected and fail-on-no-changes is enabled');
+            return;
+        }
+        const versionMap = createVersionMap(analysisResult.projects);
+        core.setOutput('projects', JSON.stringify(analysisResult.projects));
+        core.setOutput('changed-projects', JSON.stringify(analysisResult.changedProjects));
+        core.setOutput('has-changes', analysisResult.hasChanges.toString());
+        core.setOutput('summary', analysisResult.summary);
+        core.setOutput('version-map', JSON.stringify(versionMap));
+        if (analysisResult.projects.length > 0) {
+            const firstProject = analysisResult.projects[0];
+            const versionParts = firstProject.version.split(/[.-]/);
+            core.setOutput('version', firstProject.version);
+            core.setOutput('major', versionParts[0] || '0');
+            core.setOutput('minor', versionParts[1] || '0');
+            core.setOutput('patch', versionParts[2] || '0');
+            core.setOutput('prerelease', versionParts.length > 3 ? versionParts.slice(3).join('.') : '');
+        }
+        else {
+            core.setOutput('version', '0.1.0');
+            core.setOutput('major', '0');
+            core.setOutput('minor', '1');
+            core.setOutput('patch', '0');
+            core.setOutput('prerelease', '');
+        }
+        if (updateProjectProperties || writeMrVersionProps) {
+            if (dryRun) {
+                core.info('[DRY RUN] Would update project properties');
+            }
+            else {
+                await updateProjects(analysisResult.projects, updateProjectProperties, writeMrVersionProps);
+            }
+        }
+        await core.summary
+            .addHeading('📊 Version Calculation Results')
+            .addDetails('📈 Summary', `- **Total Projects**: ${analysisResult.projects.length}\n` +
+            `- **Projects with Changes**: ${analysisResult.changedProjects.length}\n` +
+            `- **Test Projects**: ${results.filter(p => p.isTestProject).length}${!includeTestProjects ? ' (excluded)' : ''}\n` +
+            `- **Repository**: \`${repositoryPath}\`\n` +
+            `- **Prerelease Type**: \`${prereleaseType}\`\n` +
+            `- **Tag Prefix**: \`${tagPrefix}\``)
+            .addDetails('🔄 Changed Projects', analysisResult.changedProjects.length > 0
+            ? analysisResult.changedProjects.map(p => `- **${p.project}**: \`${p.version}\` _(${p.changeReason})_`).join('\n')
+            : '_No projects have version changes._')
+            .addDetails('✅ All Projects', analysisResult.projects.map(p => `- **${p.project}**: \`${p.version}\`${p.versionChanged ? ' 🔄' : ''}`).join('\n'));
+        if (outputVersionInformation) {
+            await core.summary
+                .addDetails('📋 Detailed Output', `\`\`\`${outputFormat}\n${formatSummary(analysisResult, outputFormat)}\n\`\`\``);
+        }
+        await core.summary.write();
+        core.info(`✅ Analyzed ${results.length} projects, ${analysisResult.changedProjects.length} with changes`);
+    }
+    catch (error) {
+        await core.summary
+            .addHeading('❌ Version Calculation Failed')
+            .addDetails('🐛 Error Details', `\`\`\`\n${error instanceof Error ? error.message : String(error)}\n\`\`\``)
+            .write();
+        core.setFailed(`Failed to calculate versions: ${error instanceof Error ? error.message : String(error)}`);
+    }
+}
+async function findProjectFiles(pattern, repositoryPath) {
+    const globber = await glob.create(pattern, {
+        matchDirectories: false,
+        implicitDescendants: true
+    });
+    const files = await globber.glob();
+    return files.filter(file => file.endsWith('.csproj') ||
+        file.endsWith('.vbproj') ||
+        file.endsWith('.fsproj')).map(file => path.resolve(repositoryPath, file));
+}
+async function calculateProjectVersion(options) {
+    const args = [
+        'version',
+        '--repo', options.repositoryPath,
+        '--project', options.projectFile,
+        '--json'
+    ];
+    if (options.prereleaseType && options.prereleaseType !== 'none') {
+        args.push('--prerelease-type', options.prereleaseType);
+    }
+    if (options.tagPrefix) {
+        args.push('--tag-prefix', options.tagPrefix);
+    }
+    if (options.forceVersion) {
+        args.push('--force-version', options.forceVersion);
+    }
+    if (options.dependencies) {
+        args.push('--dependencies', options.dependencies);
+    }
+    if (options.configFile) {
+        args.push('--config-file', options.configFile);
+    }
+    if (options.dryRun) {
+        args.push('--dry-run');
+    }
+    const output = await exec.getExecOutput('mr-version', args, {
+        silent: true,
+        ignoreReturnCode: true
+    });
+    if (output.exitCode !== 0) {
+        throw new Error(`mr-version failed for ${options.projectFile}: ${output.stderr}`);
+    }
+    try {
+        const stdout = output.stdout.trim();
+        if (!stdout) {
+            throw new Error('mr-version returned empty output');
+        }
+        return JSON.parse(stdout);
+    }
+    catch (error) {
+        throw new Error(`Failed to parse mr-version output for ${options.projectFile}: ${error}`);
+    }
+}
+function analyzeResults(projects, includeTestProjects) {
+    const testProjectCount = projects.filter(p => p.isTestProject).length;
+    const filteredProjects = includeTestProjects
+        ? projects
+        : projects.filter(p => !p.isTestProject);
+    if (!includeTestProjects && testProjectCount > 0) {
+        core.info(`Filtered out ${testProjectCount} test project(s)`);
+    }
+    const changedProjects = filteredProjects.filter(p => p.versionChanged);
+    const hasChanges = changedProjects.length > 0;
+    const summary = generateSummary(filteredProjects, changedProjects);
+    return {
+        projects: filteredProjects,
+        changedProjects,
+        hasChanges,
+        summary
+    };
+}
+function generateSummary(allProjects, changedProjects) {
+    const lines = [];
+    lines.push(`**📊 Version Calculation Summary**`);
+    lines.push(`- Total projects: ${allProjects.length}`);
+    lines.push(`- Projects with changes: ${changedProjects.length}`);
+    lines.push(`- Projects unchanged: ${allProjects.length - changedProjects.length}`);
+    if (changedProjects.length > 0) {
+        lines.push('');
+        lines.push('**🔄 Changed Projects:**');
+        for (const project of changedProjects) {
+            lines.push(`- **${project.project}**: ${project.version} _(${project.changeReason})_`);
+        }
+    }
+    if (allProjects.length - changedProjects.length > 0) {
+        lines.push('');
+        lines.push('**✅ Unchanged Projects:**');
+        for (const project of allProjects.filter(p => !p.versionChanged)) {
+            lines.push(`- **${project.project}**: ${project.version}`);
+        }
+    }
+    return lines.join('\n');
+}
+function formatSummary(result, format) {
+    switch (format.toLowerCase()) {
+        case 'yaml':
+            return formatAsYaml(result);
+        case 'text':
+            return formatAsText(result);
+        case 'json':
+        default:
+            return JSON.stringify(result, null, 2);
+    }
+}
+function formatAsYaml(result) {
+    const lines = [];
+    lines.push('```yaml');
+    lines.push('projects:');
+    for (const project of result.projects) {
+        lines.push(`  - name: ${project.project}`);
+        lines.push(`    version: ${project.version}`);
+        lines.push(`    changed: ${project.versionChanged}`);
+        if (project.changeReason) {
+            lines.push(`    reason: "${project.changeReason}"`);
+        }
+    }
+    lines.push('```');
+    return lines.join('\n');
+}
+function formatAsText(result) {
+    const lines = [];
+    lines.push('```');
+    lines.push('Project Versions:');
+    lines.push('================');
+    for (const project of result.projects) {
+        const status = project.versionChanged ? '🔄 CHANGED' : '✅ UNCHANGED';
+        lines.push(`${status} ${project.project}: ${project.version}`);
+        if (project.changeReason) {
+            lines.push(`    Reason: ${project.changeReason}`);
+        }
+    }
+    lines.push('```');
+    return lines.join('\n');
+}
+function createVersionMap(projects) {
+    const map = {};
+    for (const project of projects) {
+        map[project.project] = project.version;
+        const relativePath = path.relative(process.cwd(), project.path);
+        map[relativePath] = project.version;
+    }
+    return map;
+}
+async function updateProjects(projects, updateProperties, writeProps) {
+    for (const project of projects) {
+        try {
+            if (updateProperties) {
+                await updateProjectFile(project);
+            }
+            if (writeProps) {
+                await writeMrVersionPropsFile(project);
+            }
+        }
+        catch (error) {
+            core.warning(`Failed to update project ${project.project}: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    }
+}
+async function updateProjectFile(project) {
+    const content = await fs.readFile(project.path, 'utf8');
+    const versionMatch = project.version.match(/^(\d+)\.(\d+)\.(\d+)(?:-(.+))?$/);
+    if (!versionMatch) {
+        core.warning(`Cannot parse version ${project.version} for ${project.project}`);
+        return;
+    }
+    const [, major, minor, patch, prerelease] = versionMatch;
+    let updatedContent = content;
+    updatedContent = updatedContent.replace(/<Version>.*<\/Version>/g, `<Version>${project.version}</Version>`);
+    updatedContent = updatedContent.replace(/<VersionMajor>.*<\/VersionMajor>/g, `<VersionMajor>${major}</VersionMajor>`);
+    updatedContent = updatedContent.replace(/<VersionMinor>.*<\/VersionMinor>/g, `<VersionMinor>${minor}</VersionMinor>`);
+    updatedContent = updatedContent.replace(/<VersionPatch>.*<\/VersionPatch>/g, `<VersionPatch>${patch}</VersionPatch>`);
+    if (prerelease) {
+        updatedContent = updatedContent.replace(/<VersionSuffix>.*<\/VersionSuffix>/g, `<VersionSuffix>${prerelease}</VersionSuffix>`);
+    }
+    if (updatedContent !== content) {
+        await fs.writeFile(project.path, updatedContent, 'utf8');
+        core.info(`Updated version properties in ${project.project}`);
+    }
+}
+async function writeMrVersionPropsFile(project) {
+    const projectDir = path.dirname(project.path);
+    const propsPath = path.join(projectDir, 'MrVersion.props');
+    const versionMatch = project.version.match(/^(\d+)\.(\d+)\.(\d+)(?:-(.+))?$/);
+    if (!versionMatch) {
+        core.warning(`Cannot parse version ${project.version} for ${project.project}`);
+        return;
+    }
+    const [, major, minor, patch, prerelease] = versionMatch;
+    const propsContent = `<Project>
+  <!-- Generated by Mister.Version -->
+  <PropertyGroup>
+    <Version>${project.version}</Version>
+    <VersionMajor>${major}</VersionMajor>
+    <VersionMinor>${minor}</VersionMinor>
+    <VersionPatch>${patch}</VersionPatch>${prerelease ? `
+    <VersionSuffix>${prerelease}</VersionSuffix>` : ''}
+    <AssemblyVersion>${major}.${minor}.${patch}.0</AssemblyVersion>
+    <FileVersion>${major}.${minor}.${patch}.0</FileVersion>
+    <InformationalVersion>${project.version}${project.commitSha ? `+${project.commitSha.substring(0, 7)}` : ''}</InformationalVersion>
+  </PropertyGroup>
+</Project>
+`;
+    await fs.writeFile(propsPath, propsContent, 'utf8');
+    core.info(`Created MrVersion.props for ${project.project}`);
+}
+if (require.main === require.cache[eval('__filename')]) {
+    run();
+}
+
+
+/***/ }),
+
 /***/ 2613:
 /***/ ((module) => {
 
@@ -30357,7 +30372,7 @@ module.exports = parseParams
 /******/ 	// startup
 /******/ 	// Load entry module and return exports
 /******/ 	// This entry module is referenced by other modules so it can't be inlined
-/******/ 	var __webpack_exports__ = __nccwpck_require__(137);
+/******/ 	var __webpack_exports__ = __nccwpck_require__(9407);
 /******/ 	module.exports = __webpack_exports__;
 /******/ 	
 /******/ })()
