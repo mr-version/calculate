@@ -28210,23 +28210,94 @@ async function run() {
                 await updateProjects(analysisResult.projects, updateProjectProperties, writeMrVersionProps);
             }
         }
-        await core.summary
-            .addHeading('📊 Version Calculation Results')
+        const validationErrors = [];
+        const validationWarnings = [];
+        let hasValidationErrors = false;
+        let hasValidationWarnings = false;
+        for (const project of results) {
+            if (project.validation) {
+                if (project.validation.errors && project.validation.errors.length > 0) {
+                    validationErrors.push({ project: project.project, errors: project.validation.errors });
+                    hasValidationErrors = true;
+                    for (const error of project.validation.errors) {
+                        core.error(`${project.project}: ${error.message}`, {
+                            title: 'Version Validation Error',
+                            file: project.path
+                        });
+                    }
+                }
+                if (project.validation.warnings && project.validation.warnings.length > 0) {
+                    validationWarnings.push({ project: project.project, warnings: project.validation.warnings });
+                    hasValidationWarnings = true;
+                    for (const warning of project.validation.warnings) {
+                        core.warning(`${project.project}: ${warning.message}`, {
+                            title: 'Version Validation Warning',
+                            file: project.path
+                        });
+                    }
+                }
+            }
+        }
+        const summary = core.summary.addHeading('📊 Version Calculation Results');
+        if (hasValidationErrors || hasValidationWarnings) {
+            let validationSummary = '';
+            if (hasValidationErrors) {
+                validationSummary += `### ❌ Validation Errors\n\n`;
+                for (const { project, errors } of validationErrors) {
+                    validationSummary += `**${project}:**\n`;
+                    for (const error of errors) {
+                        validationSummary += `- ❌ ${error.message}\n`;
+                        if (error.expected && error.actual) {
+                            validationSummary += `  - Expected: \`${error.expected}\`, Actual: \`${error.actual}\`\n`;
+                        }
+                        if (error.details) {
+                            validationSummary += `  - ${error.details}\n`;
+                        }
+                    }
+                    validationSummary += '\n';
+                }
+            }
+            if (hasValidationWarnings) {
+                validationSummary += `### ⚠️ Validation Warnings\n\n`;
+                for (const { project, warnings } of validationWarnings) {
+                    validationSummary += `**${project}:**\n`;
+                    for (const warning of warnings) {
+                        validationSummary += `- ⚠️ ${warning.message}\n`;
+                        if (warning.details) {
+                            validationSummary += `  - ${warning.details}\n`;
+                        }
+                    }
+                    validationSummary += '\n';
+                }
+            }
+            summary.addRaw(validationSummary);
+        }
+        summary
             .addDetails('📈 Summary', `- **Total Projects**: ${analysisResult.projects.length}\n` +
             `- **Projects with Changes**: ${analysisResult.changedProjects.length}\n` +
             `- **Test Projects**: ${results.filter(p => p.isTestProject).length}${!includeTestProjects ? ' (excluded)' : ''}\n` +
+            (hasValidationErrors ? `- **Validation Errors**: ❌ ${validationErrors.length} project(s)\n` : '') +
+            (hasValidationWarnings ? `- **Validation Warnings**: ⚠️ ${validationWarnings.length} project(s)\n` : '') +
             `- **Repository**: \`${repositoryPath}\`\n` +
             `- **Prerelease Type**: \`${prereleaseType}\`\n` +
             `- **Tag Prefix**: \`${tagPrefix}\``)
             .addDetails('🔄 Changed Projects', analysisResult.changedProjects.length > 0
-            ? analysisResult.changedProjects.map(p => `- **${p.project}**: \`${p.version}\` _(${p.changeReason})_`).join('\n')
+            ? analysisResult.changedProjects.map(p => `- **${p.project}**: \`${p.version}\` _(${p.changeReason})_${p.validation && !p.validation.isValid ? ' ❌' : ''}`).join('\n')
             : '_No projects have version changes._')
-            .addDetails('✅ All Projects', analysisResult.projects.map(p => `- **${p.project}**: \`${p.version}\`${p.versionChanged ? ' 🔄' : ''}`).join('\n'));
+            .addDetails('✅ All Projects', analysisResult.projects.map(p => `- **${p.project}**: \`${p.version}\`${p.versionChanged ? ' 🔄' : ''}${p.validation && !p.validation.isValid ? ' ❌' : ''}`).join('\n'));
         if (outputVersionInformation) {
-            await core.summary
+            summary
                 .addDetails('📋 Detailed Output', `\`\`\`${outputFormat}\n${formatSummary(analysisResult, outputFormat)}\n\`\`\``);
         }
-        await core.summary.write();
+        await summary.write();
+        core.setOutput('has-validation-errors', hasValidationErrors.toString());
+        core.setOutput('has-validation-warnings', hasValidationWarnings.toString());
+        core.setOutput('validation-errors-count', validationErrors.length.toString());
+        core.setOutput('validation-warnings-count', validationWarnings.length.toString());
+        if (hasValidationErrors) {
+            core.setFailed(`Version validation failed for ${validationErrors.length} project(s). See annotations for details.`);
+            return;
+        }
         core.info(`✅ Analyzed ${results.length} projects, ${analysisResult.changedProjects.length} with changes`);
     }
     catch (error) {

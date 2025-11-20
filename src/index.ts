@@ -4,6 +4,27 @@ import * as glob from '@actions/glob'
 import * as path from 'path'
 import * as fs from 'fs/promises'
 
+interface ValidationError {
+  message: string
+  details?: string
+  constraintName?: string
+  expected?: string
+  actual?: string
+}
+
+interface ValidationWarning {
+  message: string
+  details?: string
+  ruleName?: string
+}
+
+interface ValidationResult {
+  isValid: boolean
+  summary: string
+  errors?: ValidationError[]
+  warnings?: ValidationWarning[]
+}
+
 interface ProjectVersion {
   project: string  // Changed from 'name' to match CLI output
   path: string
@@ -18,6 +39,7 @@ interface ProjectVersion {
   isTestProject: boolean
   isPackable: boolean
   dependencies: string[]
+  validation?: ValidationResult
 }
 
 interface VersionCalculationResult {
@@ -122,38 +144,127 @@ async function run(): Promise<void> {
       }
     }
 
+    // Collect validation results
+    const validationErrors: Array<{ project: string; errors: ValidationError[] }> = []
+    const validationWarnings: Array<{ project: string; warnings: ValidationWarning[] }> = []
+    let hasValidationErrors = false
+    let hasValidationWarnings = false
+
+    for (const project of results) {
+      if (project.validation) {
+        if (project.validation.errors && project.validation.errors.length > 0) {
+          validationErrors.push({ project: project.project, errors: project.validation.errors })
+          hasValidationErrors = true
+
+          // Display errors as GitHub Action annotations
+          for (const error of project.validation.errors) {
+            core.error(`${project.project}: ${error.message}`, {
+              title: 'Version Validation Error',
+              file: project.path
+            })
+          }
+        }
+
+        if (project.validation.warnings && project.validation.warnings.length > 0) {
+          validationWarnings.push({ project: project.project, warnings: project.validation.warnings })
+          hasValidationWarnings = true
+
+          // Display warnings as GitHub Action annotations
+          for (const warning of project.validation.warnings) {
+            core.warning(`${project.project}: ${warning.message}`, {
+              title: 'Version Validation Warning',
+              file: project.path
+            })
+          }
+        }
+      }
+    }
+
     // Add collapsible summary to job output
-    await core.summary
-      .addHeading('📊 Version Calculation Results')
-      .addDetails('📈 Summary', 
+    const summary = core.summary.addHeading('📊 Version Calculation Results')
+
+    // Add validation summary if there are issues
+    if (hasValidationErrors || hasValidationWarnings) {
+      let validationSummary = ''
+
+      if (hasValidationErrors) {
+        validationSummary += `### ❌ Validation Errors\n\n`
+        for (const { project, errors } of validationErrors) {
+          validationSummary += `**${project}:**\n`
+          for (const error of errors) {
+            validationSummary += `- ❌ ${error.message}\n`
+            if (error.expected && error.actual) {
+              validationSummary += `  - Expected: \`${error.expected}\`, Actual: \`${error.actual}\`\n`
+            }
+            if (error.details) {
+              validationSummary += `  - ${error.details}\n`
+            }
+          }
+          validationSummary += '\n'
+        }
+      }
+
+      if (hasValidationWarnings) {
+        validationSummary += `### ⚠️ Validation Warnings\n\n`
+        for (const { project, warnings } of validationWarnings) {
+          validationSummary += `**${project}:**\n`
+          for (const warning of warnings) {
+            validationSummary += `- ⚠️ ${warning.message}\n`
+            if (warning.details) {
+              validationSummary += `  - ${warning.details}\n`
+            }
+          }
+          validationSummary += '\n'
+        }
+      }
+
+      summary.addRaw(validationSummary)
+    }
+
+    summary
+      .addDetails('📈 Summary',
         `- **Total Projects**: ${analysisResult.projects.length}\n` +
         `- **Projects with Changes**: ${analysisResult.changedProjects.length}\n` +
         `- **Test Projects**: ${results.filter(p => p.isTestProject).length}${!includeTestProjects ? ' (excluded)' : ''}\n` +
+        (hasValidationErrors ? `- **Validation Errors**: ❌ ${validationErrors.length} project(s)\n` : '') +
+        (hasValidationWarnings ? `- **Validation Warnings**: ⚠️ ${validationWarnings.length} project(s)\n` : '') +
         `- **Repository**: \`${repositoryPath}\`\n` +
         `- **Prerelease Type**: \`${prereleaseType}\`\n` +
         `- **Tag Prefix**: \`${tagPrefix}\``
       )
-      .addDetails('🔄 Changed Projects', 
-        analysisResult.changedProjects.length > 0 
-          ? analysisResult.changedProjects.map(p => 
-              `- **${p.project}**: \`${p.version}\` _(${p.changeReason})_`
+      .addDetails('🔄 Changed Projects',
+        analysisResult.changedProjects.length > 0
+          ? analysisResult.changedProjects.map(p =>
+              `- **${p.project}**: \`${p.version}\` _(${p.changeReason})_${p.validation && !p.validation.isValid ? ' ❌' : ''}`
             ).join('\n')
           : '_No projects have version changes._'
       )
-      .addDetails('✅ All Projects', 
-        analysisResult.projects.map(p => 
-          `- **${p.project}**: \`${p.version}\`${p.versionChanged ? ' 🔄' : ''}`
+      .addDetails('✅ All Projects',
+        analysisResult.projects.map(p =>
+          `- **${p.project}**: \`${p.version}\`${p.versionChanged ? ' 🔄' : ''}${p.validation && !p.validation.isValid ? ' ❌' : ''}`
         ).join('\n')
       )
 
     if (outputVersionInformation) {
-      await core.summary
-        .addDetails('📋 Detailed Output', 
+      summary
+        .addDetails('📋 Detailed Output',
           `\`\`\`${outputFormat}\n${formatSummary(analysisResult, outputFormat)}\n\`\`\``
         )
     }
 
-    await core.summary.write()
+    await summary.write()
+
+    // Set validation outputs
+    core.setOutput('has-validation-errors', hasValidationErrors.toString())
+    core.setOutput('has-validation-warnings', hasValidationWarnings.toString())
+    core.setOutput('validation-errors-count', validationErrors.length.toString())
+    core.setOutput('validation-warnings-count', validationWarnings.length.toString())
+
+    // If there are validation errors, fail the action
+    if (hasValidationErrors) {
+      core.setFailed(`Version validation failed for ${validationErrors.length} project(s). See annotations for details.`)
+      return
+    }
 
     core.info(`✅ Analyzed ${results.length} projects, ${analysisResult.changedProjects.length} with changes`)
 

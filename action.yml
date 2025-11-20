@@ -82,6 +82,14 @@ outputs:
     description: 'Patch version number of the first changed project'
   prerelease:
     description: 'Prerelease version string of the first changed project (if any)'
+  has-validation-errors:
+    description: 'Whether any projects have validation errors'
+  has-validation-warnings:
+    description: 'Whether any projects have validation warnings'
+  validation-errors-count:
+    description: 'Number of projects with validation errors'
+  validation-warnings-count:
+    description: 'Number of projects with validation warnings'
 
 runs:
   using: 'node20'
