@@ -28087,6 +28087,97 @@ module.exports = {
 
 /***/ }),
 
+/***/ 1243:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.countVersionTags = countVersionTags;
+exports.evaluateHistory = evaluateHistory;
+exports.inspectHistory = inspectHistory;
+const exec = __importStar(__nccwpck_require__(5236));
+function escapeRegExp(text) {
+    return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+function countVersionTags(tags, tagPrefix) {
+    const pattern = new RegExp(`(^|/)${escapeRegExp(tagPrefix)}\\d`);
+    return tags.filter(tag => pattern.test(tag.trim())).length;
+}
+function evaluateHistory(info, allowShallow) {
+    if (info.shallow) {
+        const tagState = info.reachableVersionTags === 0
+            ? 'no version tag is reachable from HEAD'
+            : `only part of the history is present (${info.reachableVersionTags} version tag(s) reachable from HEAD)`;
+        const message = `The repository at '${info.gitRoot}' is a shallow clone and ${tagState}, so versions would be calculated ` +
+            `from incomplete history (typically every project becomes 0.1.0). Fetch the full history and tags, e.g. ` +
+            `actions/checkout with 'fetch-depth: 0' (or run 'git fetch --unshallow --tags')` +
+            (allowShallow ? '.' : `, or set 'allow-shallow: true' to calculate anyway.`);
+        return { level: allowShallow ? 'warning' : 'error', message };
+    }
+    if (info.totalTags === 0) {
+        return {
+            level: 'notice',
+            message: `No tags found in '${info.gitRoot}': all projects start from their base version. If this repository ` +
+                `already has releases, make sure tags are fetched (actions/checkout with 'fetch-depth: 0' fetches them).`
+        };
+    }
+    return { level: 'ok' };
+}
+async function git(args, cwd) {
+    return exec.getExecOutput('git', args, { cwd, silent: true, ignoreReturnCode: true });
+}
+async function inspectHistory(repositoryRoot, tagPrefix) {
+    const topLevel = await git(['rev-parse', '--show-toplevel'], repositoryRoot);
+    if (topLevel.exitCode !== 0) {
+        throw new Error(`repository-path '${repositoryRoot}' is not inside a git repository: ${(topLevel.stderr || topLevel.stdout).trim()}`);
+    }
+    const gitRoot = topLevel.stdout.trim();
+    const shallowOutput = await git(['rev-parse', '--is-shallow-repository'], repositoryRoot);
+    const shallow = shallowOutput.exitCode === 0 && shallowOutput.stdout.trim() === 'true';
+    const allTags = await git(['tag', '--list'], repositoryRoot);
+    const totalTags = allTags.exitCode === 0 ? allTags.stdout.split('\n').filter(t => t.trim()).length : 0;
+    const merged = await git(['tag', '--merged', 'HEAD'], repositoryRoot);
+    const reachableVersionTags = merged.exitCode === 0 ? countVersionTags(merged.stdout.split('\n'), tagPrefix) : 0;
+    return { gitRoot, shallow, reachableVersionTags, totalTags };
+}
+
+
+/***/ }),
+
 /***/ 9407:
 /***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
 
@@ -28128,10 +28219,20 @@ var __importStar = (this && this.__importStar) || (function () {
 Object.defineProperty(exports, "__esModule", ({ value: true }));
 exports.run = run;
 const core = __importStar(__nccwpck_require__(7484));
-const exec = __importStar(__nccwpck_require__(5236));
-const glob = __importStar(__nccwpck_require__(7206));
 const path = __importStar(__nccwpck_require__(6928));
 const fs = __importStar(__nccwpck_require__(1943));
+const git_1 = __nccwpck_require__(1243);
+const mrversion_1 = __nccwpck_require__(2390);
+const projects_1 = __nccwpck_require__(7233);
+const version_1 = __nccwpck_require__(311);
+const CALCULATION_MODES = {
+    'report': 'one `mr-version report` call',
+    'per-project': 'one `mr-version version` call per project',
+    'report+per-project': '`mr-version report` plus per-project `mr-version version` calls'
+};
+function getBooleanInput(name, defaultValue = false) {
+    return core.getInput(name).trim() === '' ? defaultValue : core.getBooleanInput(name);
+}
 async function run() {
     try {
         const projectsInput = core.getInput('projects') || '**/*.csproj';
@@ -28141,41 +28242,56 @@ async function run() {
         const forceVersion = core.getInput('force-version');
         const dependencies = core.getInput('dependencies');
         const outputFormat = core.getInput('output-format') || 'json';
-        const failOnNoChanges = core.getBooleanInput('fail-on-no-changes');
-        const updateProjectProperties = core.getBooleanInput('update-project-properties');
-        const writeMrVersionProps = core.getBooleanInput('write-mrversion-props');
+        const failOnNoChanges = getBooleanInput('fail-on-no-changes');
+        const updateProjectProperties = getBooleanInput('update-project-properties');
+        const writeMrVersionProps = getBooleanInput('write-mrversion-props');
         const configFile = core.getInput('config-file');
-        const outputVersionInformation = core.getBooleanInput('output-version-information');
-        const dryRun = core.getBooleanInput('dry-run');
-        const includeTestProjects = core.getBooleanInput('include-test-projects');
+        const outputVersionInformation = getBooleanInput('output-version-information');
+        const dryRun = getBooleanInput('dry-run');
+        const includeTestProjects = getBooleanInput('include-test-projects');
+        const allowShallow = getBooleanInput('allow-shallow');
+        const repositoryRoot = path.resolve(repositoryPath);
         core.info('Calculating project versions...');
-        const projectFiles = await findProjectFiles(projectsInput, repositoryPath);
+        if (dependencies) {
+            core.warning("The 'dependencies' input is ignored: mr-version tracks each project's ProjectReference dependencies " +
+                '(direct and transitive) automatically. Use projects.<name>.additionalMonitorPaths in mr-version.yml for other paths.');
+        }
+        const history = await (0, git_1.inspectHistory)(repositoryRoot, tagPrefix);
+        const verdict = (0, git_1.evaluateHistory)(history, allowShallow);
+        if (verdict.level === 'error') {
+            throw new Error(verdict.message);
+        }
+        else if (verdict.level === 'warning') {
+            core.warning(verdict.message ?? '');
+        }
+        else if (verdict.level === 'notice') {
+            core.notice(verdict.message ?? '');
+        }
+        const selection = await (0, projects_1.findProjectFiles)(projectsInput, repositoryRoot);
+        const projectFiles = selection.files;
+        if (selection.outside.length > 0) {
+            core.info(`Ignored ${selection.outside.length} project file(s) outside ${repositoryRoot}: ${selection.outside.join(', ')}`);
+        }
         core.info(`Found ${projectFiles.length} project files`);
         if (!includeTestProjects) {
             core.info('Test projects will be excluded from results');
         }
-        if (projectFiles.length === 0) {
-            if (failOnNoChanges) {
-                core.setFailed('No project files found and fail-on-no-changes is enabled');
-                return;
-            }
-            core.warning('No project files found matching the pattern');
-        }
-        const results = [];
-        for (const projectFile of projectFiles) {
-            const result = await calculateProjectVersion({
-                projectFile,
-                repositoryPath,
-                prereleaseType,
-                tagPrefix,
-                forceVersion,
-                dependencies,
-                configFile,
-                dryRun
-            });
-            results.push(result);
-        }
+        const calculation = await (0, mrversion_1.calculateVersions)({
+            repositoryRoot,
+            gitRoot: history.gitRoot,
+            projectFiles,
+            prereleaseType,
+            tagPrefix,
+            forceVersion,
+            configFile
+        });
+        const results = calculation.projects;
+        core.info(`Calculated ${results.length} project versions (${calculation.mode}${calculation.reason ? `: ${calculation.reason}` : ''})`);
         const analysisResult = analyzeResults(results, includeTestProjects);
+        if (analysisResult.projects.length === 0) {
+            throw new Error(`All ${results.length} matched project(s) are test projects, which are excluded. ` +
+                `Set 'include-test-projects: true' or change the 'projects' input.`);
+        }
         if (failOnNoChanges && !analysisResult.hasChanges) {
             core.setFailed('No version changes detected and fail-on-no-changes is enabled');
             return;
@@ -28184,23 +28300,26 @@ async function run() {
         core.setOutput('projects', JSON.stringify(analysisResult.projects));
         core.setOutput('changed-projects', JSON.stringify(analysisResult.changedProjects));
         core.setOutput('has-changes', analysisResult.hasChanges.toString());
+        core.setOutput('projects-count', analysisResult.projects.length.toString());
+        core.setOutput('changed-count', analysisResult.changedProjects.length.toString());
         core.setOutput('summary', analysisResult.summary);
         core.setOutput('version-map', JSON.stringify(versionMap));
-        if (analysisResult.projects.length > 0) {
-            const firstProject = analysisResult.projects[0];
-            const versionParts = firstProject.version.split(/[.-]/);
-            core.setOutput('version', firstProject.version);
-            core.setOutput('major', versionParts[0] || '0');
-            core.setOutput('minor', versionParts[1] || '0');
-            core.setOutput('patch', versionParts[2] || '0');
-            core.setOutput('prerelease', versionParts.length > 3 ? versionParts.slice(3).join('.') : '');
-        }
-        else {
-            core.setOutput('version', '0.1.0');
-            core.setOutput('major', '0');
-            core.setOutput('minor', '1');
-            core.setOutput('patch', '0');
-            core.setOutput('prerelease', '');
+        const primaryProject = (0, version_1.selectPrimaryProject)(analysisResult.changedProjects, analysisResult.projects);
+        if (primaryProject) {
+            const parts = (0, version_1.parseVersion)(primaryProject.version);
+            core.setOutput('version', primaryProject.version);
+            core.setOutput('version-project', primaryProject.project);
+            if (parts) {
+                core.setOutput('major', parts.major);
+                core.setOutput('minor', parts.minor);
+                core.setOutput('patch', parts.patch);
+                core.setOutput('prerelease', parts.prerelease);
+            }
+            else {
+                core.warning(`Cannot split version '${primaryProject.version}' of ${primaryProject.project} into major/minor/patch`);
+                for (const name of ['major', 'minor', 'patch', 'prerelease'])
+                    core.setOutput(name, '');
+            }
         }
         if (updateProjectProperties || writeMrVersionProps) {
             if (dryRun) {
@@ -28280,7 +28399,8 @@ async function run() {
             (hasValidationWarnings ? `- **Validation Warnings**: ⚠️ ${validationWarnings.length} project(s)\n` : '') +
             `- **Repository**: \`${repositoryPath}\`\n` +
             `- **Prerelease Type**: \`${prereleaseType}\`\n` +
-            `- **Tag Prefix**: \`${tagPrefix}\``)
+            `- **Tag Prefix**: \`${tagPrefix}\`\n` +
+            `- **Calculation**: ${CALCULATION_MODES[calculation.mode]}${calculation.reason ? ` (${calculation.reason})` : ''}`)
             .addDetails('🔄 Changed Projects', analysisResult.changedProjects.length > 0
             ? analysisResult.changedProjects.map(p => `- **${p.project}**: \`${p.version}\` _(${p.changeReason})_${p.validation && !p.validation.isValid ? ' ❌' : ''}`).join('\n')
             : '_No projects have version changes._')
@@ -28306,59 +28426,6 @@ async function run() {
             .addDetails('🐛 Error Details', `\`\`\`\n${error instanceof Error ? error.message : String(error)}\n\`\`\``)
             .write();
         core.setFailed(`Failed to calculate versions: ${error instanceof Error ? error.message : String(error)}`);
-    }
-}
-async function findProjectFiles(pattern, repositoryPath) {
-    const globber = await glob.create(pattern, {
-        matchDirectories: false,
-        implicitDescendants: true
-    });
-    const files = await globber.glob();
-    return files.filter(file => file.endsWith('.csproj') ||
-        file.endsWith('.vbproj') ||
-        file.endsWith('.fsproj')).map(file => path.resolve(repositoryPath, file));
-}
-async function calculateProjectVersion(options) {
-    const args = [
-        'version',
-        '--repo', options.repositoryPath,
-        '--project', options.projectFile,
-        '--json'
-    ];
-    if (options.prereleaseType && options.prereleaseType !== 'none') {
-        args.push('--prerelease-type', options.prereleaseType);
-    }
-    if (options.tagPrefix) {
-        args.push('--tag-prefix', options.tagPrefix);
-    }
-    if (options.forceVersion) {
-        args.push('--force-version', options.forceVersion);
-    }
-    if (options.dependencies) {
-        args.push('--dependencies', options.dependencies);
-    }
-    if (options.configFile) {
-        args.push('--config-file', options.configFile);
-    }
-    if (options.dryRun) {
-        args.push('--dry-run');
-    }
-    const output = await exec.getExecOutput('mr-version', args, {
-        silent: true,
-        ignoreReturnCode: true
-    });
-    if (output.exitCode !== 0) {
-        throw new Error(`mr-version failed for ${options.projectFile}: ${output.stderr}`);
-    }
-    try {
-        const stdout = output.stdout.trim();
-        if (!stdout) {
-            throw new Error('mr-version returned empty output');
-        }
-        return JSON.parse(stdout);
-    }
-    catch (error) {
-        throw new Error(`Failed to parse mr-version output for ${options.projectFile}: ${error}`);
     }
 }
 function analyzeResults(projects, includeTestProjects) {
@@ -28468,12 +28535,12 @@ async function updateProjects(projects, updateProperties, writeProps) {
 }
 async function updateProjectFile(project) {
     const content = await fs.readFile(project.path, 'utf8');
-    const versionMatch = project.version.match(/^(\d+)\.(\d+)\.(\d+)(?:-(.+))?$/);
-    if (!versionMatch) {
+    const parts = (0, version_1.parseVersion)(project.version);
+    if (!parts) {
         core.warning(`Cannot parse version ${project.version} for ${project.project}`);
         return;
     }
-    const [, major, minor, patch, prerelease] = versionMatch;
+    const { major, minor, patch, prerelease } = parts;
     let updatedContent = content;
     updatedContent = updatedContent.replace(/<Version>.*<\/Version>/g, `<Version>${project.version}</Version>`);
     updatedContent = updatedContent.replace(/<VersionMajor>.*<\/VersionMajor>/g, `<VersionMajor>${major}</VersionMajor>`);
@@ -28490,12 +28557,12 @@ async function updateProjectFile(project) {
 async function writeMrVersionPropsFile(project) {
     const projectDir = path.dirname(project.path);
     const propsPath = path.join(projectDir, 'MrVersion.props');
-    const versionMatch = project.version.match(/^(\d+)\.(\d+)\.(\d+)(?:-(.+))?$/);
-    if (!versionMatch) {
+    const parts = (0, version_1.parseVersion)(project.version);
+    if (!parts) {
         core.warning(`Cannot parse version ${project.version} for ${project.project}`);
         return;
     }
-    const [, major, minor, patch, prerelease] = versionMatch;
+    const { major, minor, patch, prerelease } = parts;
     const propsContent = `<Project>
   <!-- Generated by Mister.Version -->
   <PropertyGroup>
@@ -28515,6 +28582,432 @@ async function writeMrVersionPropsFile(project) {
 }
 if (require.main === require.cache[eval('__filename')]) {
     run();
+}
+
+
+/***/ }),
+
+/***/ 2390:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.DEFAULT_CONFIG_FILES = void 0;
+exports.findDefaultConfig = findDefaultConfig;
+exports.reportBlockers = reportBlockers;
+exports.buildReportArgs = buildReportArgs;
+exports.buildVersionArgs = buildVersionArgs;
+exports.formatCliFailure = formatCliFailure;
+exports.parseCliJson = parseCliJson;
+exports.parseReportOutput = parseReportOutput;
+exports.mapReportProject = mapReportProject;
+exports.matchReportProjects = matchReportProjects;
+exports.calculateProjectVersion = calculateProjectVersion;
+exports.mapLimit = mapLimit;
+exports.calculateVersions = calculateVersions;
+const core = __importStar(__nccwpck_require__(7484));
+const exec = __importStar(__nccwpck_require__(5236));
+const fs = __importStar(__nccwpck_require__(9896));
+const os = __importStar(__nccwpck_require__(857));
+const path = __importStar(__nccwpck_require__(6928));
+const projects_1 = __nccwpck_require__(7233);
+exports.DEFAULT_CONFIG_FILES = ['mr-version.yml', 'mr-version.yaml', 'mister-version.yml', 'mister-version.yaml'];
+function findDefaultConfig(gitRoot) {
+    return exports.DEFAULT_CONFIG_FILES.map(name => path.join(gitRoot, name)).find(file => fs.existsSync(file));
+}
+function reportBlockers(options, defaultConfig) {
+    const blockers = [];
+    if (options.prereleaseType && options.prereleaseType.toLowerCase() !== 'none') {
+        blockers.push(`prerelease-type '${options.prereleaseType}'`);
+    }
+    if (options.forceVersion)
+        blockers.push('force-version');
+    if (options.configFile)
+        blockers.push(`config-file '${options.configFile}'`);
+    else if (defaultConfig)
+        blockers.push(`configuration file '${path.basename(defaultConfig)}'`);
+    return blockers;
+}
+function buildReportArgs(options) {
+    return [
+        'report',
+        '--repo', options.repositoryRoot,
+        '--output', 'json',
+        '--include-test-projects',
+        '--include-non-packable',
+        '--tag-prefix', options.tagPrefix
+    ];
+}
+function buildVersionArgs(options, projectFile) {
+    const args = ['version', '--repo', options.repositoryRoot, '--project', projectFile, '--json'];
+    if (options.prereleaseType && options.prereleaseType.toLowerCase() !== 'none') {
+        args.push('--prerelease-type', options.prereleaseType);
+    }
+    if (options.tagPrefix)
+        args.push('--tag-prefix', options.tagPrefix);
+    if (options.forceVersion)
+        args.push('--force-version', options.forceVersion);
+    if (options.configFile)
+        args.push('--config-file', options.configFile);
+    return args;
+}
+function truncate(text, max = 4000) {
+    return text.length > max ? `${text.slice(0, max)}\n... (${text.length - max} more characters)` : text;
+}
+function formatCliFailure(what, args, output) {
+    const lines = [`${what}: 'mr-version ${args.join(' ')}' exited with code ${output.exitCode}`];
+    const stderr = output.stderr.trim();
+    const stdout = output.stdout.trim();
+    if (stderr)
+        lines.push(`stderr:\n${truncate(stderr)}`);
+    if (stdout)
+        lines.push(`stdout:\n${truncate(stdout)}`);
+    if (!stderr && !stdout)
+        lines.push('(no output)');
+    return lines.join('\n');
+}
+async function runMrVersion(args) {
+    try {
+        return await exec.getExecOutput('mr-version', args, { silent: true, ignoreReturnCode: true });
+    }
+    catch (error) {
+        throw new Error(`Could not run mr-version (${error instanceof Error ? error.message : String(error)}). ` +
+            `Install it first, e.g. with the mr-version/setup action.`);
+    }
+}
+function parseCliJson(stdout) {
+    const text = stdout.trim();
+    if (!text)
+        throw new Error('mr-version returned empty output');
+    try {
+        return JSON.parse(text);
+    }
+    catch (error) {
+        const start = text.search(/^\{/m);
+        if (start > 0)
+            return JSON.parse(text.slice(start));
+        throw error;
+    }
+}
+function parseReportOutput(stdout) {
+    const report = parseCliJson(stdout);
+    if (!report || !Array.isArray(report.projects)) {
+        throw new Error("mr-version report output has no 'projects' array");
+    }
+    return report;
+}
+function reportProjectFullPath(project, reportRoot) {
+    if (project.fullPath)
+        return project.fullPath;
+    if (project.path)
+        return path.resolve(reportRoot, project.path);
+    return undefined;
+}
+function mapReportProject(project, projectFile, pathByName) {
+    const version = project.version ?? {};
+    return {
+        project: project.name,
+        path: projectFile,
+        version: version.version ?? '',
+        previousVersion: version.previousVersion ?? null,
+        versionChanged: version.versionChanged === true,
+        changeReason: version.changeReason ?? null,
+        commitSha: version.commitSha ?? null,
+        commitDate: version.commitDate ?? null,
+        commitMessage: version.commitMessage ?? null,
+        branchType: version.branchType ?? null,
+        branchName: version.branchName ?? null,
+        commitHeight: version.commitHeight ?? null,
+        isTestProject: project.isTestProject === true,
+        isPackable: project.isPackable !== false,
+        dependencies: (project.dependencies?.all ?? []).map(dep => pathByName.get(dep.name) ?? dep.name),
+        validation: null
+    };
+}
+function matchReportProjects(report, projectFiles, reportRoot) {
+    const byPath = new Map();
+    const pathByName = new Map();
+    for (const project of report.projects) {
+        const fullPath = reportProjectFullPath(project, report.repository ?? reportRoot);
+        if (!fullPath || !project.name)
+            continue;
+        byPath.set((0, projects_1.realpathOrSelf)(fullPath), project);
+        if (!pathByName.has(project.name))
+            pathByName.set(project.name, fullPath);
+    }
+    return projectFiles.map(file => {
+        const project = byPath.get((0, projects_1.realpathOrSelf)(file));
+        if (!project || !project.version?.version)
+            return undefined;
+        return mapReportProject(project, file, pathByName);
+    });
+}
+async function calculateViaReport(options) {
+    const args = buildReportArgs(options);
+    const output = await runMrVersion(args);
+    if (output.exitCode !== 0) {
+        throw new Error(formatCliFailure('mr-version report failed', args, output));
+    }
+    core.debug(`mr-version report stderr:\n${output.stderr}`);
+    let report;
+    try {
+        report = parseReportOutput(output.stdout);
+    }
+    catch (error) {
+        throw new Error(`Failed to parse 'mr-version report' output: ${error instanceof Error ? error.message : String(error)}`);
+    }
+    return matchReportProjects(report, options.projectFiles, options.gitRoot);
+}
+async function calculateProjectVersion(options, projectFile) {
+    const args = buildVersionArgs(options, projectFile);
+    const output = await runMrVersion(args);
+    if (output.exitCode !== 0) {
+        throw new Error(formatCliFailure(`mr-version failed for ${projectFile}`, args, output));
+    }
+    let result;
+    try {
+        result = parseCliJson(output.stdout);
+    }
+    catch (error) {
+        throw new Error(`Failed to parse mr-version output for ${projectFile}: ${error instanceof Error ? error.message : String(error)}\n` +
+            `stdout:\n${truncate(output.stdout.trim())}\nstderr:\n${truncate(output.stderr.trim())}`);
+    }
+    return { ...result, path: projectFile };
+}
+async function mapLimit(items, limit, fn) {
+    const results = new Array(items.length);
+    let next = 0;
+    const workers = Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, async () => {
+        while (next < items.length) {
+            const index = next++;
+            results[index] = await fn(items[index]);
+        }
+    });
+    await Promise.all(workers);
+    return results;
+}
+function parallelism() {
+    const cpus = typeof os.availableParallelism === 'function' ? os.availableParallelism() : os.cpus().length;
+    return Math.max(1, Math.min(4, cpus));
+}
+async function calculateVersions(options) {
+    const blockers = reportBlockers(options, options.configFile ? undefined : findDefaultConfig(options.gitRoot));
+    let fromReport;
+    let reason;
+    if (blockers.length === 0) {
+        try {
+            fromReport = await calculateViaReport(options);
+        }
+        catch (error) {
+            reason = `mr-version report failed`;
+            core.warning(`Falling back to one 'mr-version version' call per project: ${error instanceof Error ? error.message : String(error)}`);
+        }
+    }
+    else {
+        reason = `${blockers.join(', ')} ${blockers.length === 1 ? 'is' : 'are'} not supported by 'mr-version report'`;
+        core.info(`Calculating versions with one 'mr-version version' call per project: ${reason}`);
+    }
+    const missing = options.projectFiles.filter((_, index) => !fromReport?.[index]);
+    if (fromReport && missing.length > 0) {
+        core.info(`mr-version report did not cover ${missing.length} project(s); calculating them individually: ${missing.join(', ')}`);
+    }
+    const individual = await mapLimit(missing, parallelism(), file => calculateProjectVersion(options, file));
+    const individualByFile = new Map(missing.map((file, index) => [file, individual[index]]));
+    const projects = options.projectFiles.map((file, index) => fromReport?.[index] ?? individualByFile.get(file));
+    const mode = !fromReport ? 'per-project' : missing.length > 0 ? 'report+per-project' : 'report';
+    if (mode === 'report+per-project')
+        reason = `mr-version report did not cover ${missing.length} project(s)`;
+    return { projects, mode, reason };
+}
+
+
+/***/ }),
+
+/***/ 7233:
+/***/ (function(__unused_webpack_module, exports, __nccwpck_require__) {
+
+"use strict";
+
+var __createBinding = (this && this.__createBinding) || (Object.create ? (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    var desc = Object.getOwnPropertyDescriptor(m, k);
+    if (!desc || ("get" in desc ? !m.__esModule : desc.writable || desc.configurable)) {
+      desc = { enumerable: true, get: function() { return m[k]; } };
+    }
+    Object.defineProperty(o, k2, desc);
+}) : (function(o, m, k, k2) {
+    if (k2 === undefined) k2 = k;
+    o[k2] = m[k];
+}));
+var __setModuleDefault = (this && this.__setModuleDefault) || (Object.create ? (function(o, v) {
+    Object.defineProperty(o, "default", { enumerable: true, value: v });
+}) : function(o, v) {
+    o["default"] = v;
+});
+var __importStar = (this && this.__importStar) || (function () {
+    var ownKeys = function(o) {
+        ownKeys = Object.getOwnPropertyNames || function (o) {
+            var ar = [];
+            for (var k in o) if (Object.prototype.hasOwnProperty.call(o, k)) ar[ar.length] = k;
+            return ar;
+        };
+        return ownKeys(o);
+    };
+    return function (mod) {
+        if (mod && mod.__esModule) return mod;
+        var result = {};
+        if (mod != null) for (var k = ownKeys(mod), i = 0; i < k.length; i++) if (k[i] !== "default") __createBinding(result, mod, k[i]);
+        __setModuleDefault(result, mod);
+        return result;
+    };
+})();
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.PROJECT_EXTENSIONS = void 0;
+exports.parseProjectPatterns = parseProjectPatterns;
+exports.resolvePatterns = resolvePatterns;
+exports.isWithin = isWithin;
+exports.isProjectFile = isProjectFile;
+exports.realpathOrSelf = realpathOrSelf;
+exports.selectProjectFiles = selectProjectFiles;
+exports.findProjectFiles = findProjectFiles;
+const glob = __importStar(__nccwpck_require__(7206));
+const fs = __importStar(__nccwpck_require__(9896));
+const path = __importStar(__nccwpck_require__(6928));
+exports.PROJECT_EXTENSIONS = ['.csproj', '.vbproj', '.fsproj'];
+function parseProjectPatterns(input) {
+    return input
+        .split(/[,\r\n]+/)
+        .map(entry => entry.trim())
+        .filter(entry => entry.length > 0 && !entry.startsWith('#'));
+}
+function resolvePatterns(patterns, root) {
+    return patterns.map(pattern => {
+        const negation = /^!+/.exec(pattern)?.[0] ?? '';
+        const body = pattern.slice(negation.length).trim();
+        if (path.isAbsolute(body) || body.startsWith('~')) {
+            return negation + body;
+        }
+        return negation + path.join(root, body);
+    });
+}
+function isWithin(root, file) {
+    const relative = path.relative(root, file);
+    return relative !== '' && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative);
+}
+function isProjectFile(file) {
+    return exports.PROJECT_EXTENSIONS.some(extension => file.endsWith(extension));
+}
+function realpathOrSelf(file) {
+    try {
+        return fs.realpathSync(file);
+    }
+    catch {
+        return path.resolve(file);
+    }
+}
+function selectProjectFiles(files, root) {
+    const realRoot = realpathOrSelf(root);
+    const seen = new Set();
+    const selected = [];
+    const outside = [];
+    for (const file of files) {
+        if (!isProjectFile(file))
+            continue;
+        const absolute = path.resolve(root, file);
+        const real = realpathOrSelf(absolute);
+        if (!isWithin(realRoot, real)) {
+            outside.push(absolute);
+            continue;
+        }
+        if (seen.has(real))
+            continue;
+        seen.add(real);
+        selected.push(absolute);
+    }
+    selected.sort();
+    return { files: selected, outside };
+}
+async function findProjectFiles(projectsInput, repositoryPath) {
+    const root = path.resolve(repositoryPath);
+    const patterns = parseProjectPatterns(projectsInput);
+    if (patterns.length === 0) {
+        throw new Error(`The 'projects' input contains no patterns: ${JSON.stringify(projectsInput)}`);
+    }
+    const globber = await glob.create(resolvePatterns(patterns, root).join('\n'), {
+        matchDirectories: false,
+        implicitDescendants: true
+    });
+    const selection = selectProjectFiles(await globber.glob(), root);
+    if (selection.files.length === 0) {
+        const outsideNote = selection.outside.length > 0
+            ? ` (${selection.outside.length} matching project file(s) outside the repository were ignored: ${selection.outside.slice(0, 5).join(', ')})`
+            : '';
+        throw new Error(`No project files (${exports.PROJECT_EXTENSIONS.join(', ')}) matched the 'projects' input ${JSON.stringify(patterns)} ` +
+            `under repository-path '${root}'${outsideNote}. Patterns are relative to repository-path and may be separated by commas or newlines.`);
+    }
+    return selection;
+}
+
+
+/***/ }),
+
+/***/ 311:
+/***/ ((__unused_webpack_module, exports) => {
+
+"use strict";
+
+Object.defineProperty(exports, "__esModule", ({ value: true }));
+exports.parseVersion = parseVersion;
+exports.selectPrimaryProject = selectPrimaryProject;
+const VERSION_PATTERN = /^(\d+)\.(\d+)\.(\d+)(?:-([^+]+))?(?:\+(.*))?$/;
+function parseVersion(version) {
+    const match = VERSION_PATTERN.exec(version.trim());
+    if (!match)
+        return null;
+    return {
+        major: match[1],
+        minor: match[2],
+        patch: match[3],
+        prerelease: match[4] ?? '',
+        buildMetadata: match[5] ?? ''
+    };
+}
+function selectPrimaryProject(changedProjects, projects) {
+    return changedProjects[0] ?? projects[0];
 }
 
 

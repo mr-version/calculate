@@ -8,11 +8,11 @@ branding:
 
 inputs:
   projects:
-    description: 'Glob pattern or list of project files to version (e.g., "src/**/*.csproj" or comma-separated paths)'
+    description: 'Glob patterns or project file paths to version, separated by commas and/or newlines (e.g. "src/**/*.csproj" or "src/A/A.csproj, src/B/B.csproj"). Relative patterns are resolved against repository-path; prefix with ! to exclude. The step fails when nothing matches.'
     required: false
     default: '**/*.csproj'
   repository-path:
-    description: 'Path to the Git repository root'
+    description: 'Path to the Git repository root (project patterns are relative to it; project files outside it are ignored)'
     required: false
     default: '.'
   prerelease-type:
@@ -27,8 +27,9 @@ inputs:
     description: 'Force a specific version for all projects'
     required: false
   dependencies:
-    description: 'Comma-separated list of dependency paths to track for changes'
+    description: 'Deprecated and ignored: mr-version tracks ProjectReference dependencies (direct and transitive) automatically; use projects.<name>.additionalMonitorPaths in mr-version.yml for other paths'
     required: false
+    deprecationMessage: 'The dependencies input is ignored; mr-version detects project dependencies automatically. Use projects.<name>.additionalMonitorPaths in mr-version.yml for other paths.'
   output-format:
     description: 'Output format (json, yaml, text)'
     required: false
@@ -49,7 +50,7 @@ inputs:
     description: 'Path to mr-version.yml configuration file (auto-detected if not specified)'
     required: false
   dry-run:
-    description: 'Run in dry-run mode (show what would be done without making changes)'
+    description: 'Calculate versions but do not modify project files (skips update-project-properties and write-mrversion-props)'
     required: false
     default: 'false'
   output-version-information:
@@ -60,6 +61,10 @@ inputs:
     description: 'Include test projects in the version calculation results'
     required: false
     default: 'false'
+  allow-shallow:
+    description: 'Calculate versions even if the repository is a shallow clone. By default a shallow clone fails the step, because missing history and tags make every project fall back to its base version (use actions/checkout with fetch-depth: 0)'
+    required: false
+    default: 'false'
 
 outputs:
   projects:
@@ -68,20 +73,26 @@ outputs:
     description: 'JSON array of projects with version changes'
   has-changes:
     description: 'Whether any projects have version changes'
+  projects-count:
+    description: 'Number of projects in the projects output'
+  changed-count:
+    description: 'Number of projects in the changed-projects output'
   summary:
     description: 'Human-readable summary of version calculations'
   version-map:
     description: 'JSON map of project names/paths to their calculated versions'
   version:
-    description: 'The calculated version of the first changed project (if any)'
+    description: 'The calculated version of the first changed project, or of the first project when none changed'
+  version-project:
+    description: 'Name of the project the version, major, minor, patch and prerelease outputs come from'
   major:
-    description: 'Major version number of the first changed project'
+    description: 'Major version number of the version output'
   minor:
-    description: 'Minor version number of the first changed project'
+    description: 'Minor version number of the version output'
   patch:
-    description: 'Patch version number of the first changed project'
+    description: 'Patch version number of the version output'
   prerelease:
-    description: 'Prerelease version string of the first changed project (if any)'
+    description: 'Prerelease label of the version output, verbatim (e.g. "rc.1" or "new-widget.2"; empty for a release version)'
   has-validation-errors:
     description: 'Whether any projects have validation errors'
   has-validation-warnings:
@@ -92,5 +103,5 @@ outputs:
     description: 'Number of projects with validation warnings'
 
 runs:
-  using: 'node20'
+  using: 'node24'
   main: 'dist/index.js'

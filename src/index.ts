@@ -1,52 +1,27 @@
 import * as core from '@actions/core'
-import * as exec from '@actions/exec'
-import * as glob from '@actions/glob'
 import * as path from 'path'
 import * as fs from 'fs/promises'
-
-interface ValidationError {
-  message: string
-  details?: string
-  constraintName?: string
-  expected?: string
-  actual?: string
-}
-
-interface ValidationWarning {
-  message: string
-  details?: string
-  ruleName?: string
-}
-
-interface ValidationResult {
-  isValid: boolean
-  summary: string
-  errors?: ValidationError[]
-  warnings?: ValidationWarning[]
-}
-
-interface ProjectVersion {
-  project: string  // Changed from 'name' to match CLI output
-  path: string
-  version: string
-  versionChanged: boolean
-  changeReason?: string
-  commitSha?: string
-  commitDate?: string
-  commitMessage?: string
-  branchType?: string
-  branchName?: string
-  isTestProject: boolean
-  isPackable: boolean
-  dependencies: string[]
-  validation?: ValidationResult
-}
+import { evaluateHistory, inspectHistory } from './git'
+import { CalculationResult, ProjectVersion, ValidationError, ValidationWarning, calculateVersions } from './mrversion'
+import { findProjectFiles } from './projects'
+import { parseVersion, selectPrimaryProject } from './version'
 
 interface VersionCalculationResult {
   projects: ProjectVersion[]
   changedProjects: ProjectVersion[]
   hasChanges: boolean
   summary: string
+}
+
+const CALCULATION_MODES: Record<CalculationResult['mode'], string> = {
+  'report': 'one `mr-version report` call',
+  'per-project': 'one `mr-version version` call per project',
+  'report+per-project': '`mr-version report` plus per-project `mr-version version` calls'
+}
+
+/** Like core.getBooleanInput, but an unset input means `defaultValue` instead of an error. */
+function getBooleanInput(name: string, defaultValue = false): boolean {
+  return core.getInput(name).trim() === '' ? defaultValue : core.getBooleanInput(name)
 }
 
 async function run(): Promise<void> {
@@ -58,50 +33,70 @@ async function run(): Promise<void> {
     const forceVersion = core.getInput('force-version')
     const dependencies = core.getInput('dependencies')
     const outputFormat = core.getInput('output-format') || 'json'
-    const failOnNoChanges = core.getBooleanInput('fail-on-no-changes')
-    const updateProjectProperties = core.getBooleanInput('update-project-properties')
-    const writeMrVersionProps = core.getBooleanInput('write-mrversion-props')
+    const failOnNoChanges = getBooleanInput('fail-on-no-changes')
+    const updateProjectProperties = getBooleanInput('update-project-properties')
+    const writeMrVersionProps = getBooleanInput('write-mrversion-props')
     const configFile = core.getInput('config-file')
-    const outputVersionInformation = core.getBooleanInput('output-version-information')
-    const dryRun = core.getBooleanInput('dry-run')
-    const includeTestProjects = core.getBooleanInput('include-test-projects')
+    const outputVersionInformation = getBooleanInput('output-version-information')
+    const dryRun = getBooleanInput('dry-run')
+    const includeTestProjects = getBooleanInput('include-test-projects')
+    const allowShallow = getBooleanInput('allow-shallow')
+    const repositoryRoot = path.resolve(repositoryPath)
 
     core.info('Calculating project versions...')
 
-    // Find project files
-    const projectFiles = await findProjectFiles(projectsInput, repositoryPath)
+    if (dependencies) {
+      core.warning(
+        "The 'dependencies' input is ignored: mr-version tracks each project's ProjectReference dependencies " +
+        '(direct and transitive) automatically. Use projects.<name>.additionalMonitorPaths in mr-version.yml for other paths.'
+      )
+    }
+
+    // Refuse to calculate from a shallow clone: it silently yields 0.1.0 for every project
+    const history = await inspectHistory(repositoryRoot, tagPrefix)
+    const verdict = evaluateHistory(history, allowShallow)
+    if (verdict.level === 'error') {
+      throw new Error(verdict.message)
+    } else if (verdict.level === 'warning') {
+      core.warning(verdict.message ?? '')
+    } else if (verdict.level === 'notice') {
+      core.notice(verdict.message ?? '')
+    }
+
+    // Find project files (relative patterns are resolved against repository-path)
+    const selection = await findProjectFiles(projectsInput, repositoryRoot)
+    const projectFiles = selection.files
+    if (selection.outside.length > 0) {
+      core.info(`Ignored ${selection.outside.length} project file(s) outside ${repositoryRoot}: ${selection.outside.join(', ')}`)
+    }
     core.info(`Found ${projectFiles.length} project files`)
-    
+
     if (!includeTestProjects) {
       core.info('Test projects will be excluded from results')
     }
 
-    if (projectFiles.length === 0) {
-      if (failOnNoChanges) {
-        core.setFailed('No project files found and fail-on-no-changes is enabled')
-        return
-      }
-      core.warning('No project files found matching the pattern')
-    }
-
-    // Calculate versions for each project
-    const results: ProjectVersion[] = []
-    for (const projectFile of projectFiles) {
-      const result = await calculateProjectVersion({
-        projectFile,
-        repositoryPath,
-        prereleaseType,
-        tagPrefix,
-        forceVersion,
-        dependencies,
-        configFile,
-        dryRun
-      })
-      results.push(result)
-    }
+    // Calculate versions (one `mr-version report` call when possible, else one `mr-version version` per project)
+    const calculation: CalculationResult = await calculateVersions({
+      repositoryRoot,
+      gitRoot: history.gitRoot,
+      projectFiles,
+      prereleaseType,
+      tagPrefix,
+      forceVersion,
+      configFile
+    })
+    const results = calculation.projects
+    core.info(`Calculated ${results.length} project versions (${calculation.mode}${calculation.reason ? `: ${calculation.reason}` : ''})`)
 
     // Analyze results
     const analysisResult = analyzeResults(results, includeTestProjects)
+
+    if (analysisResult.projects.length === 0) {
+      throw new Error(
+        `All ${results.length} matched project(s) are test projects, which are excluded. ` +
+        `Set 'include-test-projects: true' or change the 'projects' input.`
+      )
+    }
 
     // Check for failures
     if (failOnNoChanges && !analysisResult.hasChanges) {
@@ -114,25 +109,26 @@ async function run(): Promise<void> {
     core.setOutput('projects', JSON.stringify(analysisResult.projects))
     core.setOutput('changed-projects', JSON.stringify(analysisResult.changedProjects))
     core.setOutput('has-changes', analysisResult.hasChanges.toString())
+    core.setOutput('projects-count', analysisResult.projects.length.toString())
+    core.setOutput('changed-count', analysisResult.changedProjects.length.toString())
     core.setOutput('summary', analysisResult.summary)
     core.setOutput('version-map', JSON.stringify(versionMap))
 
-    // Set individual version components from the first project
-    if (analysisResult.projects.length > 0) {
-      const firstProject = analysisResult.projects[0]
-      const versionParts = firstProject.version.split(/[.-]/)
-
-      core.setOutput('version', firstProject.version)
-      core.setOutput('major', versionParts[0] || '0')
-      core.setOutput('minor', versionParts[1] || '0')
-      core.setOutput('patch', versionParts[2] || '0')
-      core.setOutput('prerelease', versionParts.length > 3 ? versionParts.slice(3).join('.') : '')
-    } else {
-      core.setOutput('version', '0.1.0')
-      core.setOutput('major', '0')
-      core.setOutput('minor', '1')
-      core.setOutput('patch', '0')
-      core.setOutput('prerelease', '')
+    // Single-version outputs come from the first changed project (else the first project)
+    const primaryProject = selectPrimaryProject(analysisResult.changedProjects, analysisResult.projects)
+    if (primaryProject) {
+      const parts = parseVersion(primaryProject.version)
+      core.setOutput('version', primaryProject.version)
+      core.setOutput('version-project', primaryProject.project)
+      if (parts) {
+        core.setOutput('major', parts.major)
+        core.setOutput('minor', parts.minor)
+        core.setOutput('patch', parts.patch)
+        core.setOutput('prerelease', parts.prerelease)
+      } else {
+        core.warning(`Cannot split version '${primaryProject.version}' of ${primaryProject.project} into major/minor/patch`)
+        for (const name of ['major', 'minor', 'patch', 'prerelease']) core.setOutput(name, '')
+      }
     }
 
     // Update project properties if requested
@@ -230,7 +226,8 @@ async function run(): Promise<void> {
         (hasValidationWarnings ? `- **Validation Warnings**: ⚠️ ${validationWarnings.length} project(s)\n` : '') +
         `- **Repository**: \`${repositoryPath}\`\n` +
         `- **Prerelease Type**: \`${prereleaseType}\`\n` +
-        `- **Tag Prefix**: \`${tagPrefix}\``
+        `- **Tag Prefix**: \`${tagPrefix}\`\n` +
+        `- **Calculation**: ${CALCULATION_MODES[calculation.mode]}${calculation.reason ? ` (${calculation.reason})` : ''}`
       )
       .addDetails('🔄 Changed Projects',
         analysisResult.changedProjects.length > 0
@@ -277,86 +274,6 @@ async function run(): Promise<void> {
       .write()
 
     core.setFailed(`Failed to calculate versions: ${error instanceof Error ? error.message : String(error)}`)
-  }
-}
-
-async function findProjectFiles(pattern: string, repositoryPath: string): Promise<string[]> {
-  const globber = await glob.create(pattern, {
-    matchDirectories: false,
-    implicitDescendants: true
-  })
-
-  const files = await globber.glob()
-
-  // Filter to only include actual project files
-  return files.filter(file =>
-    file.endsWith('.csproj') ||
-    file.endsWith('.vbproj') ||
-    file.endsWith('.fsproj')
-  ).map(file => path.resolve(repositoryPath, file))
-}
-
-interface CalculateVersionOptions {
-  projectFile: string
-  repositoryPath: string
-  prereleaseType: string
-  tagPrefix: string
-  forceVersion?: string
-  dependencies?: string
-  configFile?: string
-  dryRun?: boolean
-}
-
-async function calculateProjectVersion(options: CalculateVersionOptions): Promise<ProjectVersion> {
-  const args = [
-    'version',
-    '--repo', options.repositoryPath,
-    '--project', options.projectFile,
-    '--json'
-  ]
-
-  if (options.prereleaseType && options.prereleaseType !== 'none') {
-    args.push('--prerelease-type', options.prereleaseType)
-  }
-
-  if (options.tagPrefix) {
-    args.push('--tag-prefix', options.tagPrefix)
-  }
-
-  if (options.forceVersion) {
-    args.push('--force-version', options.forceVersion)
-  }
-
-  if (options.dependencies) {
-    args.push('--dependencies', options.dependencies)
-  }
-
-  if (options.configFile) {
-    args.push('--config-file', options.configFile)
-  }
-
-  if (options.dryRun) {
-    args.push('--dry-run')
-  }
-
-  const output = await exec.getExecOutput('mr-version', args, {
-    silent: true,
-    ignoreReturnCode: true
-  })
-
-  if (output.exitCode !== 0) {
-    throw new Error(`mr-version failed for ${options.projectFile}: ${output.stderr}`)
-  }
-
-  try {
-    const stdout = output.stdout.trim()
-    if (!stdout) {
-      throw new Error('mr-version returned empty output')
-    }
-
-    return JSON.parse(stdout) as ProjectVersion
-  } catch (error) {
-    throw new Error(`Failed to parse mr-version output for ${options.projectFile}: ${error}`)
   }
 }
 
@@ -487,13 +404,13 @@ async function updateProjectFile(project: ProjectVersion): Promise<void> {
   const content = await fs.readFile(project.path, 'utf8')
 
   // Parse version components
-  const versionMatch = project.version.match(/^(\d+)\.(\d+)\.(\d+)(?:-(.+))?$/)
-  if (!versionMatch) {
+  const parts = parseVersion(project.version)
+  if (!parts) {
     core.warning(`Cannot parse version ${project.version} for ${project.project}`)
     return
   }
 
-  const [, major, minor, patch, prerelease] = versionMatch
+  const { major, minor, patch, prerelease } = parts
 
   // Update version properties in the project file
   let updatedContent = content
@@ -537,13 +454,13 @@ async function writeMrVersionPropsFile(project: ProjectVersion): Promise<void> {
   const propsPath = path.join(projectDir, 'MrVersion.props')
 
   // Parse version components
-  const versionMatch = project.version.match(/^(\d+)\.(\d+)\.(\d+)(?:-(.+))?$/)
-  if (!versionMatch) {
+  const parts = parseVersion(project.version)
+  if (!parts) {
     core.warning(`Cannot parse version ${project.version} for ${project.project}`)
     return
   }
 
-  const [, major, minor, patch, prerelease] = versionMatch
+  const { major, minor, patch, prerelease } = parts
 
   // Create MSBuild props file content
   const propsContent = `<Project>
